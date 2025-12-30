@@ -1,6 +1,8 @@
 package com.praj.resumeai.modules.resume.services;
 
 import com.praj.resumeai.modules.resume.dto.ParsedResumeDTO;
+import com.praj.resumeai.modules.resume.entities.ResumeEntity;
+import com.praj.resumeai.modules.resume.repositories.ResumeMongoRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.tika.Tika;
 import org.springframework.ai.chat.client.ChatClient;
@@ -9,6 +11,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.InputStream;
+import java.time.LocalDateTime;
 
 @Service
 @Slf4j
@@ -16,45 +19,42 @@ public class ResumeParserService {
 
     private final ChatClient chatClient;
     private final Tika tika;
+    private final ResumeMongoRepository mongoRepository; // New dependency
 
-    public ResumeParserService(ChatClient.Builder builder) {
-        // Initialize Tika inside the constructor
+    public ResumeParserService(ChatClient.Builder builder, ResumeMongoRepository mongoRepository) {
         this.tika = new Tika();
+        this.mongoRepository = mongoRepository;
         this.chatClient = builder
                 .defaultAdvisors(new SimpleLoggerAdvisor())
                 .build();
     }
 
-    public ParsedResumeDTO parseResume(MultipartFile file) {
+    public ResumeEntity parseAndSaveResume(MultipartFile file) {
         String rawText;
 
         try (InputStream stream = file.getInputStream()) {
-            log.info("Starting text extraction for file: {}", file.getOriginalFilename());
-
-            // Extract text from the stream
             rawText = tika.parseToString(stream);
-
             if (rawText == null || rawText.trim().isEmpty()) {
-                log.error("Extraction resulted in empty text for file: {}", file.getOriginalFilename());
-                throw new RuntimeException("The uploaded PDF contains no readable text. It might be a scanned image.");
+                throw new RuntimeException("Empty content extracted.");
             }
-
-            log.info("Successfully extracted {} characters", rawText.length());
-
         } catch (Exception e) {
-            log.error("Tika extraction failed: {}", e.getMessage());
-            throw new RuntimeException("Failed to process resume file: " + e.getMessage());
+            throw new RuntimeException("Extraction failed: " + e.getMessage());
         }
 
-        return chatClient.prompt()
-                .system("""
-                    You are a specialized ATS parser. 
-                    Extract the resume text into a strictly valid JSON object.
-                    Ensure the fields match the provided structure exactly.
-                    DO NOT use markdown formatting or backticks in your response.
-                    """)
-                .user(u -> u.text("Resume Text to Parse:\n{text}").param("text", rawText))
+        // 1. Get structured data from AI
+        ParsedResumeDTO parsedData = chatClient.prompt()
+                .system("You are a specialized ATS parser. Extract resume text into a strictly valid JSON object. DO NOT use markdown.")
+                .user(u -> u.text("Resume Text:\n{text}").param("text", rawText))
                 .call()
                 .entity(ParsedResumeDTO.class);
+
+        // 2. Wrap into Entity and Persist to MongoDB
+        ResumeEntity entity = ResumeEntity.builder()
+                .fileName(file.getOriginalFilename())
+                .uploadTimestamp(LocalDateTime.now())
+                .resumeData(parsedData)
+                .build();
+
+        return mongoRepository.save(entity);
     }
 }
