@@ -11,4 +11,5 @@ public class MatchResultDTO {
     private double matchPercentage;
     private List<String> matchedSkills;
     private List<String> missingSkills;
+    private List<RecommendationDTO> recommendations;
 }
